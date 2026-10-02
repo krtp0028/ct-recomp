@@ -1053,7 +1053,7 @@ static void charge_impl(unsigned clocks)
         pend.prev_irq = pend.irq_line && !insn_i;   /* as at its last cycle start */
         take_irq = pend.prev_irq;
         cyc_done();
-        advance(clocks);
+        hclock = end;   /* advance's no-event case: end < next_ev */
         return;
     }
     struct walk w;
