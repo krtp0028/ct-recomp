@@ -90,6 +90,13 @@ const ct_overlay_func *overlay_lookup(const CPU *c)
     uint32_t at = (uint32_t)c->PB << 16 | c->PC;
     for (unsigned k = first_at(at); k < n_ovl && ovl[k]->addr == at; k++)
         if (ovl[k]->m == c->m && ovl[k]->x == c->x && valid(k)) {
+            /* A re-entry of a function already running natively is the
+               game's RTS-back-to-entry loop idiom: running it native again
+               would nest a C frame (and an act) per iteration, so the
+               interpreter runs this entry instead. */
+            for (int j = ct_ovl_n - 1; j >= 0; j--)
+                if (ct_ovl_act[j].f == ovl[k])
+                    return NULL;
             overlay_last_idx = k;
             return ovl[k];
         }

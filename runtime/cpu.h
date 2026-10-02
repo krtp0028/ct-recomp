@@ -78,7 +78,8 @@ void ct_interp_rest(CPU *cpu, uint16_t s0);
      the system executor (ct_interp_rest with the function's entry S). The
      frame scheduler's dispatcher runs that in its own instruction loop,
      without nesting (ct_tail_fn == ct_rest_runner).
-   ct_tail_fn is NULL except between such a return and its caller's ct_run. */
+   ct_tail_fn is NULL except between such a return and the dispatcher
+   clearing it. */
 extern void (*ct_tail_fn)(CPU *cpu);
 extern uint16_t ct_tail_s0;
 void ct_rest_runner(CPU *cpu);   /* ct_interp_rest(cpu, ct_tail_s0) */
@@ -97,7 +98,12 @@ static inline void ct_tail_rest(CPU *cpu, uint16_t s0)
 }
 
 /* Call a compiled function (or hook) and every function it tail-jumps to,
-   until one returns. */
+   until one returns. A function that hands its rest to the interpreter
+   (ct_tail_rest) runs it here: with the frame scheduler the rest is
+   interpreted until its function returns; without one (the strict diff_all
+   harness) ct_rest_runner's interp_call loop is the oracle. A compiled
+   callee that ends somewhere unexpected is handled by the call site's
+   return check (emit.py return_check). */
 static inline void ct_run(CPU *cpu, void (*fn)(CPU *cpu))
 {
     fn(cpu);
