@@ -65,6 +65,32 @@ static int ophct_hi, opvct_hi;  /* $213C/$213D read flip-flops */
 static uint16_t pad[4];         /* current buttons per port (sched_set_joypad) */
 static uint16_t joy[4];         /* $4218-$421F: last auto-read result */
 
+#ifdef CT_PROFILE_TIME
+#include <time.h>
+static uint64_t pt_ns(void)
+{
+    struct timespec ts;
+    timespec_get(&ts, TIME_UTC);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+static struct {
+    uint64_t ppu, apu, frame;
+    long frames;
+} pt;
+static void pt_report(void)
+{
+    if (!pt.frames)
+        return;
+    fprintf(stderr, "prof-time: %ld frames, %.3f ms/frame; ppu %.3f ms (%.0f%%), apu %.3f ms (%.0f%%)\n",
+            pt.frames, pt.frame / 1e6 / pt.frames, pt.ppu / 1e6 / pt.frames,
+            100.0 * (double)pt.ppu / (double)pt.frame, pt.apu / 1e6 / pt.frames,
+            100.0 * (double)pt.apu / (double)pt.frame);
+}
+#define PT(v, ...) do { uint64_t pt0 = pt_ns(); __VA_ARGS__; v += pt_ns() - pt0; } while (0)
+#else
+#define PT(v, ...) do { __VA_ARGS__; } while (0)
+#endif
+
 static void apu_sync(unsigned early);
 static uint64_t access_clock(unsigned early);
 static void dma_start(const uint32_t sizes[8]);
@@ -72,7 +98,11 @@ static void charge(unsigned clocks);
 static unsigned line_clocks(void);
 static void walk_reset(void);
 static void yield_frame(void);
+#ifdef __PSP__
+#define CPU_STACK (1u << 20)   /* measured use is a few KB; PSP memory is tight */
+#else
 #define CPU_STACK (8u << 20)
+#endif
 static ucontext_t cpu_ctx, host_ctx;
 static char *cpu_stack;
 static size_t max_stack;   /* deepest C stack use seen on the CPU's stack */
@@ -117,7 +147,11 @@ static int edge_in_dma;   /* this frame edge fell inside it */
 static uint64_t frame_clock;       /* line 0's start */
 static void (*frame_hook)(long frame);
 static int (*reset_hook)(long frame);
-static jmp_buf reset_jmp;
+/* __builtin_setjmp, not setjmp: the reset jump is taken on the CPU's own
+   stack (see yield_frame), and UCRT's longjmp unwinds through SEH, which
+   a stack outside the TEB's bounds cannot survive. overlay.h uses the
+   same builtins for the same reason. */
+static void *reset_jmp[5];
 static int reset_armed;          /* inside sched_run_frame */
 static long field_base;          /* frame counts since the last reset: STAT78's field bit */
 /* Interrupts entered minus RTIs executed, native or interpreted. */
@@ -387,6 +421,13 @@ int sched_audio_take(int16_t *stereo, int max)
 
 void sched_init(CPU *c)
 {
+#ifdef CT_PROFILE_TIME
+    static int pt_registered;
+    if (!pt_registered) {
+        pt_registered = 1;
+        atexit(pt_report);
+    }
+#endif
     cpu = c;
     native_build();
     max_stack = 0;
@@ -462,7 +503,7 @@ void sched_init(CPU *c)
 
 static void apu_sync(unsigned early)
 {
-    snes_apu_catch_up(access_clock(early));
+    PT(pt.apu, snes_apu_catch_up(access_clock(early)));
 }
 
 /* ---- frame ---- */
@@ -475,21 +516,20 @@ static void start_line(void)
     if (line == 0) {
         in_vblank = 0;
         rdnmi_set = rdnmi_cleared = 0;
-        PpuBeginDrawing(ppu, fb, SCHED_WIDTH * 4, 0);
+        PT(pt.ppu, PpuBeginDrawing(ppu, fb, SCHED_WIDTH * 4, 0));
         dma_initHdma(dma);
     }
     if (line == SCHED_VBLANK_LINE) {
-        ppu_drawTo(ppu, 256);   /* the last line's rest */
-        memcpy(present, fb, sizeof present);   /* rows 0-223 are final */
+        PT(pt.ppu, ppu_drawTo(ppu, 256); memcpy(present, fb, sizeof present));
         if (reset_armed && reset_hook && reset_hook(frames + 1))
-            longjmp(reset_jmp, 1);   /* see soft_reset */
+            __builtin_longjmp(reset_jmp, 1);   /* see soft_reset */
         in_vblank = 1;
         snes_oam_vblank_reload();
         autojoy_arm(line_start);
     }
     autojoy_update(line_start);
     if (line <= SCHED_HEIGHT)
-        ppu_runLine(ppu, line);   /* line L draws row L-1 */
+        PT(pt.ppu, ppu_runLine(ppu, line));   /* line L draws row L-1 */
 }
 
 /* Master clock in line `ln` where the H/V timer raises the IRQ line, or
@@ -593,8 +633,8 @@ static void advance(unsigned clocks)
             irq_done = 1;
         } else if (!hblank_done && hclock >= SCHED_HDMA_CLOCK) {
             if (line < SCHED_VBLANK_LINE) {
-                ppu_drawTo(snes_hw_ppu(), 256);   /* HDMA runs after the line's last pixel */
-                dma_doHdma(snes_hw_dma());
+                /* HDMA runs after the line's last pixel */
+                PT(pt.ppu, ppu_drawTo(snes_hw_ppu(), 256); dma_doHdma(snes_hw_dma()));
             }
             hblank_done = 1;
         } else if (!irq_done && hclock >= (unsigned)irq_at) {
@@ -1498,7 +1538,7 @@ static void cpu_main(void)
 {
     in_cpu = 1;
     for (;;) {
-        if (setjmp(reset_jmp)) {
+        if (__builtin_setjmp(reset_jmp)) {
             soft_reset();   /* ends the frame */
             yield_frame();
         }
@@ -1516,6 +1556,9 @@ static void cpu_main(void)
 
 long sched_run_frame(void)
 {
+#ifdef CT_PROFILE_TIME
+    uint64_t pt0 = pt_ns();
+#endif
     long f0 = frames;
     frame_done = 0;
     if (!cpu_live) {
@@ -1529,6 +1572,10 @@ long sched_run_frame(void)
         cpu_live = 1;
     }
     swapcontext(&host_ctx, &cpu_ctx);
+#ifdef CT_PROFILE_TIME
+    pt.frame += pt_ns() - pt0;
+    pt.frames++;
+#endif
     return frames - f0;
 }
 

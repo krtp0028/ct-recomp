@@ -16,8 +16,21 @@ import ctest_cache  # noqa: E402
 CMAKE = r'''cmake_minimum_required(VERSION 3.16)
 project(t NONE)
 enable_testing()
-add_test(NAME good COMMAND sh -c "echo run >> ${CMAKE_BINARY_DIR}/good.runs; echo 'good: 3 checks, 0 failed'")
-add_test(NAME flaky COMMAND sh -c "echo run >> ${CMAKE_BINARY_DIR}/flaky.runs; test -f ${CMAKE_SOURCE_DIR}/ok")
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME good COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/run.py good ${CMAKE_BINARY_DIR})
+add_test(NAME flaky COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/run.py flaky ${CMAKE_BINARY_DIR})
+'''
+
+RUNNER = r'''import os
+import sys
+
+name, build = sys.argv[1], sys.argv[2]
+with open(os.path.join(build, name + ".runs"), "a") as f:
+    f.write("run\n")
+if name == "good":
+    print("good: 3 checks, 0 failed")
+elif not os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ok")):
+    sys.exit(1)
 '''
 
 
@@ -38,6 +51,8 @@ def main() -> int:
         git("init", "-q")
         with open(os.path.join(src, "CMakeLists.txt"), "w") as f:
             f.write(CMAKE)
+        with open(os.path.join(src, "run.py"), "w") as f:
+            f.write(RUNNER)
         with open(os.path.join(src, ".gitignore"), "w") as f:
             f.write("build/\n")
         subprocess.run(["cmake", "-S", src, "-B", build], capture_output=True, check=True)

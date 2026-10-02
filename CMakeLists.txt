@@ -9,6 +9,15 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
 
+if(WIN32)
+    # MinGW x64 maps setjmp to the SEH-aware _setjmp, whose longjmp unwinds
+    # via RtlUnwind: that fails with STATUS_BAD_STACK on the scheduler's
+    # coroutine stack (runtime/compat/ucontext_win.c) and forces unwinding
+    # the tests' fatal-hook jumps never wanted. The non-SEH setjmp restores
+    # registers only, like glibc's.
+    add_compile_definitions(__USE_MINGW_SETJMP_NON_SEH)
+endif()
+
 # ccache, when installed: rebuilding after a branch switch or a clean costs
 # only what changed.
 find_program(CT_CCACHE ccache)
@@ -34,6 +43,13 @@ set(CT_WARN -Wall -Wextra -Wpedantic)
 
 enable_testing()
 
+# The PSP port builds the engine, the generated game code and ct_psp (see
+# game/ct/CMakeLists.txt); the host-side tests and tools are skipped.
+# pspdev's toolchain (psp-cmake) sets PSP (and CMAKE_SYSTEM_NAME=Generic).
+if(PSP OR CMAKE_SYSTEM_NAME STREQUAL "PSP")
+    set(CT_PSP ON)
+endif()
+
 # The translator (recomp/), runtime, frontend, and engine tests are
 # game-agnostic; each game under game/ supplies its symbols, generated
 # code, and ROM-dependent tests. check_agnostic enforces the split.
@@ -56,6 +72,17 @@ target_link_libraries(ct_runtime PUBLIC ct_snes_vendor m)
 target_include_directories(ct_runtime PRIVATE third_party/ares/spc700)
 target_compile_options(ct_runtime PRIVATE ${CT_WARN})
 
+# Windows has no <ucontext.h>; runtime/compat provides one with a
+# register-level context switch. The PSP (newlib) needs its own backend: a
+# MIPS o32 switch.
+if(WIN32)
+    target_sources(ct_runtime PRIVATE runtime/compat/ucontext_win.c)
+    target_include_directories(ct_runtime PUBLIC runtime/compat)
+elseif(CT_PSP)
+    target_sources(ct_runtime PRIVATE runtime/compat/ucontext_psp.c)
+    target_include_directories(ct_runtime PUBLIC runtime/compat)
+endif()
+
 # Function tables (func_table.h): a game's generated ct_funcs.c, or these
 # empty ones. OBJECT libraries, so the tables are always on the link line
 # ahead of the interpreter that reads them.
@@ -74,16 +101,19 @@ target_link_libraries(ct_sched PUBLIC ct_interp)
 target_compile_options(ct_sched PRIVATE ${CT_WARN})
 
 # ---- SDL2 input mapping (optional: skipped when SDL2 isn't installed) ----
-find_package(SDL2 CONFIG QUIET)
-if(SDL2_FOUND)
-    add_library(ct_input STATIC frontend/input.c)
-    target_include_directories(ct_input PUBLIC frontend)
-    target_link_libraries(ct_input PUBLIC SDL2::SDL2)
-    target_compile_options(ct_input PRIVATE ${CT_WARN})
-else()
-    message(STATUS "SDL2 not found: frontends not built")
+if(NOT CT_PSP)
+    find_package(SDL2 CONFIG QUIET)
+    if(SDL2_FOUND)
+        add_library(ct_input STATIC frontend/input.c)
+        target_include_directories(ct_input PUBLIC frontend)
+        target_link_libraries(ct_input PUBLIC SDL2::SDL2)
+        target_compile_options(ct_input PRIVATE ${CT_WARN})
+    else()
+        message(STATUS "SDL2 not found: frontends not built")
+    endif()
 endif()
 
+if(NOT CT_PSP)
 # ---- engine tests: no game, no ROM (synthetic image, test/harness.h) ----
 set(CT_TEST_ROM ${CMAKE_BINARY_DIR}/test_rom.sfc)
 add_custom_command(
@@ -148,6 +178,7 @@ endif()
 # No game-specific names, addresses, or words outside game/.
 add_test(NAME check_agnostic
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_agnostic.py ${CMAKE_SOURCE_DIR})
+endif()   # not CT_PSP
 
 # ---- games (need $CT_ROM; their tests are LABELS rom) ----
 if(DEFINED ENV{CT_ROM})
@@ -159,6 +190,8 @@ endif()
 
 # ---- test environment (keep last) ----
 # SDL dummy drivers: the frontend test runs headless.
-get_property(ct_engine_tests DIRECTORY PROPERTY TESTS)
-set_tests_properties(${ct_engine_tests} PROPERTIES ENVIRONMENT
-    "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy")
+if(NOT CT_PSP)
+    get_property(ct_engine_tests DIRECTORY PROPERTY TESTS)
+    set_tests_properties(${ct_engine_tests} PROPERTIES ENVIRONMENT
+        "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy")
+endif()

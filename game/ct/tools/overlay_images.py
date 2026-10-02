@@ -47,8 +47,10 @@ def main(argv: list[str]) -> int:
         if old != data:
             with open(path, 'wb') as f:
                 f.write(data)
+        # TOML has no raw backslashes in basic strings; forward slashes work
+        # for the open() in recomp/emit.py too.
         manifest += ['[[overlay]]', f'name = "{ov["name"]}"', f'dst = 0x{ov["dst"]:06X}',
-                     f'image = "{path}"']
+                     f'image = "{path.replace(chr(92), "/")}"']
         for e in ov.get('entry', []):
             states = ', '.join(f'"{s}"' for s in e['states'])
             manifest += ['[[overlay.entry]]', f'addr = 0x{e["addr"]:06X}', f'states = [{states}]']

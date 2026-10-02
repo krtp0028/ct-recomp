@@ -10,6 +10,9 @@ out/
 build/
 build2/
 build-dbg/
+build-*/
+gmon.out
+shots/
 __pycache__/
 *.pyc
 

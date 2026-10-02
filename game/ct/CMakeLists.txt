@@ -79,6 +79,17 @@ function(ct_game_exe name)
 endfunction()
 
 # ---- frontends, at the top of the build tree ----
+if(CT_PSP)
+    # The PSP frontend (this milestone: debug screen; video/audio/input next).
+    add_executable(ct_psp ${CMAKE_SOURCE_DIR}/frontend/psp_main.c)
+    target_include_directories(ct_psp PRIVATE ${CMAKE_SOURCE_DIR}/test)
+    target_link_libraries(ct_psp ct_sched ct_gen_tables ct_gen pspdebug pspdisplay pspge pspaudio
+                          pspctrl)
+    target_compile_options(ct_psp PRIVATE ${CT_WARN})
+    # Package for a real PSP (strip, fixup, PARAM.SFO, PBP); PPSSPP can boot
+    # the EBOOT.PBP as-is.
+    create_pbp_file(TARGET ct_psp TITLE "Chrono Trigger")
+else()
 ct_game_exe(ct_boot ${CMAKE_SOURCE_DIR}/tools/ct_boot.c)
 set_target_properties(ct_boot PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 if(SDL2_FOUND)
@@ -214,3 +225,4 @@ endif()
 
 set_tests_properties(${ct_game_tests} PROPERTIES LABELS rom ENVIRONMENT
     "CT_ROM=${CT_ROM};DSCOTTON_DIR=$ENV{DSCOTTON_DIR};SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy")
+endif()   # not CT_PSP

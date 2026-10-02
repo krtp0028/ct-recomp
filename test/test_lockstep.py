@@ -35,8 +35,15 @@ if "--vram" in a:
 fails = 0
 with tempfile.TemporaryDirectory() as tmp:
     probe = os.path.join(tmp, "probe")
-    open(probe, "w").write(FAKE)
-    os.chmod(probe, os.stat(probe).st_mode | stat.S_IEXEC)
+    if os.name == "nt":
+        # Windows cannot execute a shebang script: wrap it in a .cmd.
+        py = probe + ".py"
+        open(py, "w").write(FAKE)
+        probe += ".cmd"
+        open(probe, "w").write(f'@echo off\r\n"{sys.executable}" "{py}" %*\r\n')
+    else:
+        open(probe, "w").write(FAKE)
+        os.chmod(probe, os.stat(probe).st_mode | stat.S_IEXEC)
     r = subprocess.run([sys.executable, TOOL, probe, "--frames", "10"], capture_output=True,
                        text=True)
     if r.returncode != 0 or "10 frames identical" not in r.stdout:
