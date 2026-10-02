@@ -6,6 +6,13 @@ Static recompiler for Chrono Trigger (SNES, US 1.0) 65816 code to C, plus a C ru
 The recompiler and runtime are game-agnostic; everything specific to Chrono
 Trigger lives in `game/ct/`.
 
+> **Fork note:** this is a fork of
+> [ThisIsAkill/ct-recomp](https://github.com/ThisIsAkill/ct-recomp) maintained at
+> [krtp0028/ct-recomp](https://github.com/krtp0028/ct-recomp). It adds the
+> Windows and PSP ports, native-dispatch fixes and PPU rendering work.
+> Upstream code stays MIT (`Copyright (c) 2026 Akhil Moola`); fork changes are
+> MIT as well. See `THIRD_PARTY.md` for the full credits.
+
 Planned features after boot (MSU-1, achievements, save states, widescreen and
 more) are listed in [ROADMAP.md](ROADMAP.md).
 

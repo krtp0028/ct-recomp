@@ -3,6 +3,11 @@
 ct-recomp is MIT-licensed (`Copyright (c) 2026 Akhil Moola`, see `LICENSE`).
 This file tracks third-party sources used by the project and their terms.
 
+This repository is a fork of
+[ThisIsAkill/ct-recomp](https://github.com/ThisIsAkill/ct-recomp); the upstream
+copyright and MIT license are preserved, and fork changes (Windows and PSP
+ports, native-dispatch fixes, PPU work) are contributed under the same terms.
+
 ## Currently in use
 
 ### Symbol names and entry-state hints
