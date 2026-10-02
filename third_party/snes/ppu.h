@@ -50,6 +50,21 @@ struct Ppu {
   bool lineHasSprites;
   uint8_t lastBrightnessMult;
   uint8_t lastMosaicModulo;
+  /* ct-recomp: colorMapRgb (CGRAM -> final BGR) invalidation. */
+  uint32_t cgramGen, cgramRgbGen;
+  uint8_t cgramRgbBrightness;
+  /* ct-recomp: CGRAM with the fixed-color add/sub applied (halved), for the
+     composite's math path when no subscreen is added; mathKey is the
+     invalidation key (fixed color + flags). */
+  uint32_t mathFixed[256], mathFixedSub[256];
+  uint32_t mathKey;
+  /* ct-recomp: per-channel 5-bit add/sub through the brightness maps, for
+     the subscreen-compositing path (indexed [main][sub]). */
+  uint32_t mathAdd[32][32], mathAddHalf[32][32], mathSub[32][32], mathSubHalf[32][32];
+  uint8_t mapBright, mapFlags;
+  /* ct-recomp: composite only from this pixel (a mid-line write redraws the
+     row's tail with the whole-line renderer instead of the per-pixel path). */
+  int compositeFrom;
   uint8_t renderFlags;
   int drawLine, drawX;   // ct-recomp: line being drawn, next pixel (256: done)
   uint32_t renderPitch;

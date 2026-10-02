@@ -8,6 +8,36 @@
 #include "ppu.h"
 #include "src/types.h"
 
+#ifdef CT_PROFILE_TIME
+#include <time.h>
+static uint64_t ppu_pt_ns(void)
+{
+  struct timespec ts;
+  timespec_get(&ts, TIME_UTC);
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+uint64_t ppu_prof_bg, ppu_prof_spr, ppu_prof_comp, ppu_prof_whole_t, ppu_prof_part_t;
+long ppu_prof_whole, ppu_prof_partial, ppu_prof_part_px, ppu_prof_tail_whole, ppu_prof_tail_px;
+void ppu_prof_report(long frames)
+{
+  if (frames <= 0)
+    return;
+  fprintf(stderr, "ppu-prof: bg %.0f us, spr %.0f, comp %.0f, wholeT %.0f, partT %.0f us/frame; "
+                  "lines whole %ld partial %ld (tail whole %ld, tail per-pixel %ld), px/frame %.0f\n",
+          (double)ppu_prof_bg / (double)frames / 1000.0,
+          (double)ppu_prof_spr / (double)frames / 1000.0,
+          (double)ppu_prof_comp / (double)frames / 1000.0,
+          (double)ppu_prof_whole_t / (double)frames / 1000.0,
+          (double)ppu_prof_part_t / (double)frames / 1000.0, ppu_prof_whole, ppu_prof_partial,
+          ppu_prof_tail_whole, ppu_prof_tail_px, (double)ppu_prof_part_px / (double)frames);
+}
+#define PROF_INC(v) (v++)
+#define PPT(v, ...) do { uint64_t ppt0 = ppu_pt_ns(); __VA_ARGS__; v += ppu_pt_ns() - ppt0; } while (0)
+#else
+#define PROF_INC(v) do { } while (0)
+#define PPT(v, ...) do { __VA_ARGS__; } while (0)
+#endif
+
 static const uint8 kSpriteSizes[8][2] = {
   {8, 16}, {8, 32}, {8, 64}, {16, 32},
   {16, 64}, {32, 64}, {16, 32}, {16, 32}
@@ -18,6 +48,7 @@ static int ppu_getPixel(Ppu* ppu, int x, int y, bool sub, int* r, int* g, int* b
 static int ppu_getPixelForBgLayer(Ppu *ppu, int x, int y, int layer, bool priority);
 static void ppu_offsetPerTile(Ppu *ppu, int layer, int x, int y, int *hoff, int *voff);
 static void ppu_offsetPerTileLine(Ppu *ppu);
+static int ppu_offsetPerTileActive(void);
 static void ppu_calculateMode7Starts(Ppu* ppu, int y);
 static int ppu_getPixelForMode7(Ppu* ppu, int x, int layer, bool priority);
 static bool ppu_getWindowState(Ppu* ppu, int layer, int x);
@@ -49,6 +80,11 @@ void ppu_reset(Ppu* ppu) {
   ppu->drawX = 256;   // ct-recomp
   memset(ppu->vram, 0, sizeof(ppu->vram));
   ppu->lastBrightnessMult = 0xff;
+  ppu->cgramGen = 1;          // force a colorMapRgb build (ppu_updateColorMap)
+  ppu->cgramRgbGen = 0;
+  ppu->cgramRgbBrightness = 0xff;
+  ppu->mathKey = 0xffffffff;
+  ppu->compositeFrom = 0;
   ppu->lastMosaicModulo = 0xff;
   ppu->extraLeftCur = 0;
   ppu->extraRightCur = 0;
@@ -153,6 +189,57 @@ static void ppu_updateBrightness(Ppu *ppu) {
   }
 }
 
+/* ct-recomp: CGRAM entries with the current brightness applied, as the
+   B G R x words the framebuffer holds, plus the same precomputed with the
+   fixed-color add/sub the composite's math path needs. Rebuilt only when
+   CGRAM, brightness or the fixed color changed, so the whole-line
+   composite is one load and one store per pixel in the common cases. */
+static void ppu_updateColorMap(Ppu *ppu) {
+  uint32_t fixed = ppu->fixedColorR | ppu->fixedColorG << 5 | ppu->fixedColorB << 10;
+  uint32_t key = fixed | (ppu->subtractColor | ppu->halfColor << 1) << 15;
+  uint8_t flags = (uint8_t)(ppu->subtractColor | ppu->halfColor << 1);
+  if (ppu->brightness != ppu->mapBright || flags != ppu->mapFlags) {
+    /* The per-channel maps depend only on the brightness tables. */
+    for (int a = 0; a < 32; a++)
+      for (int b = 0; b < 32; b++) {
+        int v = a + b > 31 ? 31 : a + b;
+        ppu->mathAdd[a][b] = ppu->brightnessMult[v];
+        ppu->mathAddHalf[a][b] = ppu->brightnessMultHalf[v];
+        v = a - b < 0 ? 0 : a - b;
+        ppu->mathSub[a][b] = ppu->brightnessMult[v];
+        ppu->mathSubHalf[a][b] = ppu->brightnessMultHalf[v];
+      }
+    ppu->mapBright = ppu->brightness;
+    ppu->mapFlags = flags;
+  }
+  if (ppu->cgramGen == ppu->cgramRgbGen && ppu->brightness == ppu->cgramRgbBrightness &&
+      key == ppu->mathKey)
+    return;
+  for (int i = 0; i < 256; i++) {
+    uint32 color = ppu->cgram[i];
+    uint32 r = color & 0x1f, g = (color >> 5) & 0x1f, b = (color >> 10) & 0x1f;
+    ppu->colorMapRgb[i] = ppu->brightnessMult[r] << 16 | ppu->brightnessMult[g] << 8 |
+                          ppu->brightnessMult[b];
+    /* math pixels use the half map only when halfColor is on */
+    const uint8 *m = ppu->halfColor ? ppu->brightnessMultHalf : ppu->brightnessMult;
+    int ar = (int)r + ppu->fixedColorR, ag = (int)g + ppu->fixedColorG,
+        ab = (int)b + ppu->fixedColorB;
+    if (ar > 31) ar = 31;
+    if (ag > 31) ag = 31;
+    if (ab > 31) ab = 31;
+    ppu->mathFixed[i] = m[ar] << 16 | m[ag] << 8 | m[ab];
+    int sr = (int)r - ppu->fixedColorR, sg = (int)g - ppu->fixedColorG,
+        sb = (int)b - ppu->fixedColorB;
+    if (sr < 0) sr = 0;
+    if (sg < 0) sg = 0;
+    if (sb < 0) sb = 0;
+    ppu->mathFixedSub[i] = m[sr] << 16 | m[sg] << 8 | m[sb];
+  }
+  ppu->cgramRgbGen = ppu->cgramGen;
+  ppu->cgramRgbBrightness = ppu->brightness;
+  ppu->mathKey = key;
+}
+
 void PpuBeginDrawing(Ppu *ppu, uint8_t *pixels, size_t pitch, uint32_t render_flags) {
   ppu->renderFlags = render_flags;
   ppu->renderPitch = (uint)pitch;
@@ -160,12 +247,8 @@ void PpuBeginDrawing(Ppu *ppu, uint8_t *pixels, size_t pitch, uint32_t render_fl
 
   ppu_updateBrightness(ppu);
 
-  if (PpuGetCurrentRenderScale(ppu, ppu->renderFlags) == 4) {
-    for (int i = 0; i < 256; i++) {
-      uint32 color = ppu->cgram[i];
-      ppu->colorMapRgb[i] = ppu->brightnessMult[color & 0x1f] << 16 | ppu->brightnessMult[(color >> 5) & 0x1f] << 8 | ppu->brightnessMult[(color >> 10) & 0x1f];
-    }
-  }
+  if (PpuGetCurrentRenderScale(ppu, ppu->renderFlags) == 4)
+    ppu_updateColorMap(ppu);
 }
 
 static inline void ClearBackdrop(PpuPixelPrioBufs *buf) {
@@ -222,25 +305,47 @@ void ppu_drawTo(Ppu *ppu, int x) {
   if (ppu->drawX >= x)
     return;
   int line = ppu->drawLine;
-  if (ppu->drawX == 0 && x == 256 && ppu->mode != 2 && ppu->mode != 4 && ppu->mode != 6) {
-    /* ct-recomp: nothing of the line was drawn under an earlier register
-       state, so the z-buffered whole-line renderer draws exactly what the
-       per-pixel path would, far cheaper. A mid-line register write draws a
-       partial chunk first, leaving drawX > 0 and the per-pixel path in
-       charge for those lines. Modes 2/4/6 keep the per-pixel path:
-       offset-per-tile is only implemented there. */
+  /* Modes 2/4/6 use BG3 offset-per-tile, which only the per-pixel path
+     implements; when the line's table has no offsets it draws identically. */
+  int per_pixel = 0;
+  if (ppu->mode == 2 || ppu->mode == 4 || ppu->mode == 6) {
+    ppu_offsetPerTileLine(ppu);
+    per_pixel = ppu_offsetPerTileActive();
+  }
+  if (!per_pixel && ppu->drawX == 0) {
+    /* ct-recomp: the row's first draw (no earlier register state): render it
+       whole with the z-buffered renderer, then redraw only the tail after
+       this register write. A mid-line write used to send the whole row
+       through the per-pixel path; now only the pixels it actually changes
+       are drawn that way. */
     if (ppu->mode == 7)
       ppu_calculateMode7Starts(ppu, line);
-    PpuDrawWholeLine(ppu, line);
-    ppu->drawX = 256;
+    PROF_INC(ppu_prof_whole);
+    PPT(ppu_prof_whole_t, PpuDrawWholeLine(ppu, line));
+    ppu->drawX = x;
     return;
   }
+  PROF_INC(ppu_prof_partial);
+#ifdef CT_PROFILE_TIME
+  ppu_prof_part_px += x - ppu->drawX;
+#endif
+  if (!per_pixel) {
+    /* ct-recomp: the tail of a row with a mid-line write: the whole-line
+       renderer with the composite clipped to [drawX, 256) produces exactly
+       what the per-pixel path would, far cheaper. */
+    if (ppu->mode == 7)
+      ppu_calculateMode7Starts(ppu, line);
+    ppu->compositeFrom = ppu->drawX;
+    PROF_INC(ppu_prof_tail_whole);
+    PPT(ppu_prof_part_t, PpuDrawWholeLine(ppu, line));
+    ppu->compositeFrom = 0;
+    ppu->drawX = x;
+    return;
+  }
+  PROF_INC(ppu_prof_tail_px);
   if (ppu->mode == 7)
     ppu_calculateMode7Starts(ppu, line);
-  if (ppu->mode == 2 || ppu->mode == 4 || ppu->mode == 6)
-    ppu_offsetPerTileLine(ppu);   // ct-recomp: offset-per-tile
-  for (int i = ppu->drawX; i < x; i++)
-    ppu_handlePixel(ppu, i, line);
+  PPT(ppu_prof_part_t, for (int i = ppu->drawX; i < x; i++) ppu_handlePixel(ppu, i, line));
   ppu->drawX = x;
 }
 
@@ -864,7 +969,7 @@ static void PpuDrawBackgrounds(Ppu *ppu, int y, bool sub) {
 
   if (ppu->mode == 1) {
     if (ppu->lineHasSprites)
-      PpuDrawSprites(ppu, y, sub, true);
+      PPT(ppu_prof_spr, PpuDrawSprites(ppu, y, sub, true));
 
     if (IS_MOSAIC_ENABLED(ppu, 0))
       PpuDrawBackground_4bpp_mosaic(ppu, y, sub, 0, 0xc000, 0x8000);
@@ -905,7 +1010,7 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
   ClearBackdrop(&ppu->bgBuffers[0]);
 
   // Render main screen
-  PpuDrawBackgrounds(ppu, y, false);
+  PPT(ppu_prof_bg, PpuDrawBackgrounds(ppu, y, false));
 
   // The 6:th bit is automatically zero, math is never applied to the first half of the sprites.
   uint32 math_enabled = ppu->mathEnabled;
@@ -915,7 +1020,7 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
   if (ppu->preventMathMode != 3 && ppu->addSubscreen && math_enabled) {
     ClearBackdrop(&ppu->bgBuffers[1]);
     if (ppu->screenEnabled[1] != 0) {
-      PpuDrawBackgrounds(ppu, y, true);
+      PPT(ppu_prof_bg, PpuDrawBackgrounds(ppu, y, true));
       rendered_subscreen = true;
     }
   }
@@ -930,25 +1035,49 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
   uint32 cw_clip_math = ((cwin.bits & kCwBitsMod[ppu->clipMode]) ^ kCwBitsMod[ppu->clipMode + 4]) |
                         ((cwin.bits & kCwBitsMod[ppu->preventMathMode]) ^ kCwBitsMod[ppu->preventMathMode + 4]) << 8;
 
-  uint32 *dst = (uint32*)&ppu->renderBuffer[(y - 1) * ppu->renderPitch], *dst_org = dst;
-  
-  dst += (ppu->extraLeftRight - ppu->extraLeftCur);
+  uint32 *dst_org = (uint32*)&ppu->renderBuffer[(y - 1) * ppu->renderPitch];
+  uint32 *dst_row = dst_org + (ppu->extraLeftRight - ppu->extraLeftCur);
+
+  ppu_updateColorMap(ppu);
+#ifdef CT_PROFILE_TIME
+  uint64_t tcomp = ppu_pt_ns();
+#endif
 
   uint32 windex = 0;
   do {
     uint32 left = cwin.edges[windex] + kPpuExtraLeftRight, right = cwin.edges[windex + 1] + kPpuExtraLeftRight;
+    if ((int)left < ppu->compositeFrom)
+      left = (uint32)ppu->compositeFrom;   /* ct-recomp: redraw only the tail after a mid-line write */
+    uint32 *dst = dst_row + left;
+    if (left >= right)
+      continue;                            /* nothing left of this window region */
     // If clip is set, then zero out the rgb values from the main screen.
     uint32 clip_color_mask = (cw_clip_math & 1) ? 0x1f : 0;
     uint32 math_enabled_cur = (cw_clip_math & 0x100) ? math_enabled : 0;
     uint32 fixed_color = ppu->fixedColorR | ppu->fixedColorG << 5 | ppu->fixedColorB << 10;
     if (math_enabled_cur == 0 || fixed_color == 0 && !ppu->halfColor && !rendered_subscreen) {
-      // Math is disabled (or has no effect), so can avoid the per-pixel maths check
+      // Math is disabled (or has no effect): the composited CGRAM map is the
+      // whole per-pixel job (or black, if the color window clips it).
+      uint32 i = left;
+      if (clip_color_mask) {
+        const uint32 *cmap = ppu->colorMapRgb;
+        do {
+          dst[0] = cmap[ppu->bgBuffers[0].data[i] & 0xff];
+        } while (dst++, ++i < right);
+      } else {
+        do {
+          dst[0] = 0;
+        } while (dst++, ++i < right);
+      }
+    } else if (!ppu->addSubscreen && clip_color_mask) {
+      /* Fixed-color math: the add/sub tables hold the finished pixels, so
+         only the per-pixel layer check is left. */
+      const uint32 *m = ppu->subtractColor ? ppu->mathFixedSub : ppu->mathFixed;
+      const uint32 *plain = ppu->colorMapRgb;
       uint32 i = left;
       do {
-        uint32 color = ppu->cgram[ppu->bgBuffers[0].data[i] & 0xff];
-        dst[0] = ppu->brightnessMult[color & clip_color_mask] << 16 |
-                 ppu->brightnessMult[(color >> 5) & clip_color_mask] << 8 |
-                 ppu->brightnessMult[(color >> 10) & clip_color_mask];
+        uint32 d = ppu->bgBuffers[0].data[i];
+        dst[0] = (math_enabled & (1u << ((d >> 8) & 0xf))) ? m[d & 0xff] : plain[d & 0xff];
       } while (dst++, ++i < right);
     } else {
       uint8 *half_color_map = ppu->halfColor ? ppu->brightnessMultHalf : ppu->brightnessMult;
@@ -987,6 +1116,9 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
       } while (dst++, ++i < right);
     }
   } while (cw_clip_math >>= 1, ++windex < cwin.nr);
+#ifdef CT_PROFILE_TIME
+  ppu_prof_comp += ppu_pt_ns() - tcomp;
+#endif
 
   // Clear out stuff on the sides.
   if (ppu->extraLeftRight - ppu->extraLeftCur != 0)
@@ -1227,6 +1359,17 @@ static void ppu_offsetPerTile(Ppu *ppu, int layer, int x, int y, int *hoff, int 
     *hoff = offsetX + optH[layer][col];
   if (optV[layer][col] >= 0)
     *voff = y + optV[layer][col];
+}
+
+/* ct-recomp: whether the line's BG3 offset-per-tile entries do anything.
+   When they don't, the whole-line renderer draws modes 2/4/6 identically to
+   the per-pixel path (the only reason those modes stay per-pixel). */
+static int ppu_offsetPerTileActive(void) {
+  for (int layer = 0; layer < 2; layer++)
+    for (int col = 0; col < 34; col++)
+      if (optH[layer][col] >= 0 || optV[layer][col] >= 0)
+        return 1;
+  return 0;
 }
 
 static int ppu_getPixelForBgLayer(Ppu *ppu, int x, int y, int layer, bool priority) {
@@ -1608,6 +1751,7 @@ void ppu_write(Ppu* ppu, uint8_t adr, uint8_t val) {
       } else {
         // ct-recomp: CGRAM is 15-bit; bit 7 of the high byte isn't stored.
         ppu->cgram[ppu->cgramPointer++] = ((val & 0x7f) << 8) | ppu->cgramBuffer;
+  ppu->cgramGen++;
       }
       ppu->cgramSecondWrite = !ppu->cgramSecondWrite;
       break;

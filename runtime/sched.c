@@ -77,10 +77,12 @@ static struct {
     uint64_t ppu, apu, frame;
     long frames;
 } pt;
+void ppu_prof_report(long frames);   /* ppu.c, same CT_PROFILE_TIME (define it for both) */
 static void pt_report(void)
 {
     if (!pt.frames)
         return;
+    ppu_prof_report(pt.frames);
     fprintf(stderr, "prof-time: %ld frames, %.3f ms/frame; ppu %.3f ms (%.0f%%), apu %.3f ms (%.0f%%)\n",
             pt.frames, pt.frame / 1e6 / pt.frames, pt.ppu / 1e6 / pt.frames,
             100.0 * (double)pt.ppu / (double)pt.frame, pt.apu / 1e6 / pt.frames,
