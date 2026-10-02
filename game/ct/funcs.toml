@@ -10898,3 +10898,25 @@ states = ["m1x0"]
 e = 0
 module = "bankcf"
 source = "profile"
+
+# ---- hot interpreter fallbacks (ct_boot --profile top "not recompiled") ----
+# Entries that decode and emit cleanly at their observed entry states. The
+# other profile-hot addresses fail the decoder/emitter for cause (an
+# unsupported indirect jump at $C20553, a shared PLP tail at $C70A39) and
+# stay interpreted. Names from the dscotton disassembly labels.
+
+[[func]]
+name = "ScreenFx_TickVector"
+addr = 0xC3000E
+states = ["m1x0"]
+e = 0
+module = "bankc3"
+source = "profile"
+
+[[func]]
+name = "Mode7_VblankUpdate"
+addr = 0xC308D0
+states = ["m0x0", "m1x0"]
+e = 0
+module = "bankc3"
+source = "profile"
