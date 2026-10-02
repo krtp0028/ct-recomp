@@ -74,7 +74,7 @@ static uint64_t pt_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 static struct {
-    uint64_t ppu, apu, frame;
+    uint64_t ppu, apu, frame, tick, charge, disp, interp;
     long frames;
 } pt;
 void ppu_prof_report(long frames);   /* ppu.c, same CT_PROFILE_TIME (define it for both) */
@@ -83,10 +83,16 @@ static void pt_report(void)
     if (!pt.frames)
         return;
     ppu_prof_report(pt.frames);
-    fprintf(stderr, "prof-time: %ld frames, %.3f ms/frame; ppu %.3f ms (%.0f%%), apu %.3f ms (%.0f%%)\n",
-            pt.frames, pt.frame / 1e6 / pt.frames, pt.ppu / 1e6 / pt.frames,
-            100.0 * (double)pt.ppu / (double)pt.frame, pt.apu / 1e6 / pt.frames,
-            100.0 * (double)pt.apu / (double)pt.frame);
+    fprintf(stderr, "prof-time: %ld frames, %.3f ms/frame; ppu %.3f (%.0f%%), apu %.3f (%.0f%%), "
+                    "tick %.3f (%.0f%%), charge %.3f (%.0f%%), disp %.3f (%.0f%%), "
+                    "interp %.3f (%.0f%%)\n",
+            pt.frames, pt.frame / 1e6 / pt.frames,
+            pt.ppu / 1e6 / pt.frames, 100.0 * (double)pt.ppu / (double)pt.frame,
+            pt.apu / 1e6 / pt.frames, 100.0 * (double)pt.apu / (double)pt.frame,
+            pt.tick / 1e6 / pt.frames, 100.0 * (double)pt.tick / (double)pt.frame,
+            pt.charge / 1e6 / pt.frames, 100.0 * (double)pt.charge / (double)pt.frame,
+            pt.disp / 1e6 / pt.frames, 100.0 * (double)pt.disp / (double)pt.frame,
+            pt.interp / 1e6 / pt.frames, 100.0 * (double)pt.interp / (double)pt.frame);
 }
 #define PT(v, ...) do { uint64_t pt0 = pt_ns(); __VA_ARGS__; v += pt_ns() - pt0; } while (0)
 #else
@@ -98,6 +104,7 @@ static uint64_t access_clock(unsigned early);
 static void dma_start(const uint32_t sizes[8]);
 static void charge(unsigned clocks);
 static unsigned line_clocks(void);
+static void events_refresh(void);
 static void walk_reset(void);
 static void yield_frame(void);
 #ifdef __PSP__
@@ -578,6 +585,7 @@ static void begin_line(void)
     nmi_done = line != SCHED_VBLANK_LINE;
     refresh_at = 530 + 8 - (unsigned)(line_start & 7);
     refresh_done = 0;
+    events_refresh();
 }
 
 /* Clocks in the current line: 1364, except that without interlace line
@@ -587,6 +595,33 @@ static void begin_line(void)
 static unsigned line_clocks(void)
 {
     return line == 240 && ((frames - field_base) & 1) ? SCHED_CLOCKS_PER_LINE - 4 : SCHED_CLOCKS_PER_LINE;
+}
+
+/* Earliest clock in the current line at which advance has an event to run.
+   advance's fast path skips its event loop while hclock stays below it;
+   begin_line and every event advance handles refresh it. */
+static unsigned next_ev;
+static void events_refresh(void)
+{
+    unsigned e = line_clocks();
+    if (line == SCHED_VBLANK_LINE && !rdnmi_set && e > 2)
+        e = 2;
+    if (line == 0 && !rdnmi_cleared && e > 2)
+        e = 2;
+    if (!nmi_done && e > 6)
+        e = 6;
+    if (!refresh_done && e > refresh_at)
+        e = refresh_at;
+    if (!hblank_done && e > SCHED_HDMA_CLOCK)
+        e = SCHED_HDMA_CLOCK;
+    if (line == 0 && !init_done) {
+        unsigned i = 12 + (line_start & 7);
+        if (e > i)
+            e = i;
+    }
+    if (!irq_done && irq_at >= 0 && e > (unsigned)irq_at)
+        e = (unsigned)irq_at;
+    next_ev = e;
 }
 
 int sched_frame_in_dma(void) { return edge_in_dma; }
@@ -612,6 +647,8 @@ static void edge_hook(void)
 static void advance(unsigned clocks)
 {
     hclock += clocks;
+    if (hclock < next_ev)
+        return;   /* no timed event in these clocks: the common case */
     for (;;) {
         if (line == SCHED_VBLANK_LINE && !rdnmi_set && hclock >= 2) {
             rdnmi = 0x80;
@@ -664,6 +701,7 @@ static void advance(unsigned clocks)
         } else {
             break;
         }
+        events_refresh();   /* an event fired: the next one is later */
     }
 }
 
@@ -1004,18 +1042,13 @@ static void wai_cycle(void)
 }
 
 /* Charge an instruction (or interrupt entry) of `clocks` clocks. */
-static void charge(unsigned clocks)
+static void charge_impl(unsigned clocks)
 {
     if (!clocks)
         return;   /* nothing begun (already charged): pending transfers wait */
     unsigned end = hclock + clocks;
     int inside = (pend.delay | pend.hdma | pend.init | pend.dma) || pend.dma_after >= 0 ||
-                 pend.nmi_count || pend.nmi_after >= 0 ||
-                 (!nmi_done && 6 <= end) || (!irq_done && irq_at >= 0 && (unsigned)irq_at <= end) ||
-                 end >= line_clocks() || (!refresh_done && refresh_at <= end) ||
-                 (!hblank_done && line < SCHED_VBLANK_LINE && SCHED_HDMA_CLOCK <= end &&
-                  snes_hdma_enabled()) ||
-                 (line == 0 && !init_done && 12 + (line_start & 7) <= end);
+                 pend.nmi_count || pend.nmi_after >= 0 || end >= next_ev;
     if (!inside) {
         pend.prev_irq = pend.irq_line && !insn_i;   /* as at its last cycle start */
         take_irq = pend.prev_irq;
@@ -1030,6 +1063,19 @@ static void charge(unsigned clocks)
     pend.dma_after = pend.nmi_after = -1;
     take_irq = pend.prev_irq;
     walk_commit(&w, start, t);
+}
+
+/* With CT_PROFILE_TIME, time the cycle model's share; without it this is
+   the call generated code and the interpreter make (inlined). */
+static inline void charge(unsigned clocks)
+{
+#ifdef CT_PROFILE_TIME
+    uint64_t pt0 = pt_ns();
+    charge_impl(clocks);
+    pt.charge += pt_ns() - pt0;
+#else
+    charge_impl(clocks);
+#endif
 }
 
 /* One step at an instruction boundary: take a due interrupt, sit out a
@@ -1309,7 +1355,7 @@ static void overlay_bail(CPU *c, overlay_act *a, uint32_t at)
     __builtin_longjmp(a->jb, 1);
 }
 
-static void tick(CPU *c, uint32_t at, uint8_t op)
+static void tick_impl(CPU *c, uint32_t at, uint8_t op)
 {
     c->PB = (uint8_t)(at >> 16);   /* as the interpreter has it at a boundary */
     c->PC = (uint16_t)at;
@@ -1353,6 +1399,19 @@ static void tick(CPU *c, uint32_t at, uint8_t op)
             overlay_bail(c, a, at);
     }
     cyc_begin_compiled(c, at, op);
+}
+
+/* The per-instruction hook generated code calls (ct_insn): time the whole
+   hook under CT_PROFILE_TIME (tick includes charge and the cyc_* calls). */
+static void tick(CPU *c, uint32_t at, uint8_t op)
+{
+#ifdef CT_PROFILE_TIME
+    uint64_t pt0 = pt_ns();
+    tick_impl(c, at, op);
+    pt.tick += pt_ns() - pt0;
+#else
+    tick_impl(c, at, op);
+#endif
 }
 
 /* Interrupts are taken at the end of an instruction (Mesen 2
@@ -1400,8 +1459,19 @@ static void exec_one(void)
         return;
     }
     note_stack();
+#ifdef CT_PROFILE_TIME
+    const ct_func *f;
+    const ct_overlay_func *o;
+    {
+        uint64_t pt0 = pt_ns();
+        f = native_lookup(cpu);
+        o = f || !native_on ? NULL : overlay_lookup(cpu);
+        pt.disp += pt_ns() - pt0;
+    }
+#else
     const ct_func *f = native_lookup(cpu);
     const ct_overlay_func *o = f || !native_on ? NULL : overlay_lookup(cpu);
+#endif
     if (f || o) {
         if (f) {
             f->fn(cpu);
@@ -1431,7 +1501,13 @@ static void exec_one(void)
         prof_charge();
     }
     insn_i = cpu->i;
+#ifdef CT_PROFILE_TIME
+    uint64_t pt0 = pt_ns();
+#endif
     unsigned clocks = interp_step(cpu);
+#ifdef CT_PROFILE_TIME
+    pt.interp += pt_ns() - pt0;
+#endif
     uint8_t op = interp_last_op();
     if (interp_waiting())
         wai_over = 0;   /* WAI just ran */
