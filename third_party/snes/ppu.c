@@ -222,6 +222,19 @@ void ppu_drawTo(Ppu *ppu, int x) {
   if (ppu->drawX >= x)
     return;
   int line = ppu->drawLine;
+  if (ppu->drawX == 0 && x == 256 && ppu->mode != 2 && ppu->mode != 4 && ppu->mode != 6) {
+    /* ct-recomp: nothing of the line was drawn under an earlier register
+       state, so the z-buffered whole-line renderer draws exactly what the
+       per-pixel path would, far cheaper. A mid-line register write draws a
+       partial chunk first, leaving drawX > 0 and the per-pixel path in
+       charge for those lines. Modes 2/4/6 keep the per-pixel path:
+       offset-per-tile is only implemented there. */
+    if (ppu->mode == 7)
+      ppu_calculateMode7Starts(ppu, line);
+    PpuDrawWholeLine(ppu, line);
+    ppu->drawX = 256;
+    return;
+  }
   if (ppu->mode == 7)
     ppu_calculateMode7Starts(ppu, line);
   if (ppu->mode == 2 || ppu->mode == 4 || ppu->mode == 6)
