@@ -89,6 +89,19 @@ static inline void ct_insn(CPU *c, uint32_t at, uint8_t op, uint8_t last)
     bus_mdr = last;
 }
 
+/* The same for a run of straight-line register-only instructions the
+   emitter grouped (emit.py): the scheduler charges the run in one step
+   when it is provably unobservable (no pending interrupt/DMA/event), and
+   otherwise replays the ordinary sequence exactly, trace hook included. */
+static inline void ct_insn_run(CPU *c, unsigned n, const uint32_t *at, const uint8_t *op,
+                               const uint8_t *last)
+{
+    if (ct_tick_run && ct_tick_run(c, n, at, op, last))
+        return;
+    for (unsigned k = 0; k < n; k++)
+        ct_insn(c, at[k], op[k], last[k]);
+}
+
 /* ---- mode checks ---- */
 
 static inline void cpu_enter(const CPU *c, uint32_t at, int m, int x)

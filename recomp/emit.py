@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import tomllib
 
@@ -227,6 +228,111 @@ def _build_templates() -> dict:
 TEMPLATES = _build_templates()
 
 NO_FALLTHROUGH = {'RTS', 'RTL', 'RTI', 'BRA', 'BRL', 'JMP', 'JML', 'STP', 'BRK', 'COP', 'WAI'}  # JMP includes (abs,X)
+
+# Straight-line register-only opcodes: no bus access, no branch/control
+# transfer, no M/X/I change, no stack, no block move, no wait/stop. Only
+# these may be grouped into ct_insn_run (runtime/sched.c tick_run).
+REG_ONLY = {
+    0x0A, 0x2A, 0x4A, 0x6A,              # ASL/ROL/LSR/ROR A
+    0x1A, 0x3A,                          # INC/DEC A
+    0xE8, 0xC8, 0xCA, 0x88,              # INX INY DEX DEY
+    0xAA, 0xA8, 0x8A, 0x98, 0x9B, 0xBB, 0xBA, 0x9A,  # TA*
+    0xEB,                                # XBA
+    0x18, 0x38, 0xB8, 0xD8, 0xF8,        # CLC SEC CLV CLD SED
+    0xEA,                                # NOP
+    0x1B, 0x3B, 0x5B, 0x7B,              # TCS TSC TCD TDC
+}
+
+_CT_INSN_RE = re.compile(r'^    ct_insn\(cpu, 0x([0-9A-F]{6}), 0x([0-9A-F]{2}), 0x([0-9A-F]{2})\);$')
+_LABEL_RE = re.compile(r'^(\w+): ')
+
+
+def batch_runs(lines: list[str]) -> list[str]:
+    """Group fall-through runs of register-only instructions into one
+    ct_insn_run call. Intermediate labels must be unreferenced (a jump into
+    the middle would skip the batch and lose its accounting), the run must
+    stay in one bank (one fetch speed) and one M/X state, and each member's
+    body must be plain register work (no goto/return/ct_* call). Everything
+    else is left byte-identical."""
+    targets = set(re.findall(r'goto (\w+);', '\n'.join(lines)))
+    recs = []
+    i = 0
+    while i < len(lines):
+        m = _CT_INSN_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        name = None
+        if i > 0:
+            lm = _LABEL_RE.match(lines[i - 1])
+            if lm:
+                name = lm.group(1)
+        b = i + 1
+        if lines[b].strip().startswith('{') and lines[b].strip().endswith('}'):
+            e = b + 1
+        else:
+            depth = 0
+            e = b
+            while e < len(lines):
+                depth += lines[e].count('{') - lines[e].count('}')
+                e += 1
+                if depth == 0:
+                    break
+        recs.append({'name': name, 'label_i': i - 1, 'insn_i': i, 'end_i': e,
+                     'at': int(m.group(1), 16), 'op': int(m.group(2), 16),
+                     'last': int(m.group(3), 16)})
+        i = e
+
+    def pure(r):
+        body = ''.join(lines[r['insn_i'] + 1:r['end_i']])
+        return 'goto' not in body and 'return' not in body and 'ct_' not in body
+
+    runs = []
+    run = []
+    for r in recs:
+        if not run:
+            ok = r['op'] in REG_ONLY and pure(r)
+        else:
+            p = run[-1]
+            ok = (r['op'] in REG_ONLY and pure(r) and p['op'] in REG_ONLY
+                  and r['label_i'] == p['end_i']              # fall-through
+                  and r['name'] and r['name'] not in targets
+                  and p['name'] and p['name'] not in targets
+                  and r['name'][8:] == p['name'][8:]          # same M/X state
+                  and (r['at'] >> 16) == (run[0]['at'] >> 16))
+        if ok:
+            run.append(r)
+        else:
+            if len(run) > 1:
+                runs.append(run)
+            run = [r] if (r['op'] in REG_ONLY and pure(r)) else []
+    if len(run) > 1:
+        runs.append(run)
+    if not runs:
+        return lines
+    repl = {}
+    drop = set()
+    for run in runs:
+        ats = ', '.join(f'0x{r["at"]:06X}' for r in run)
+        ops = ', '.join(f'0x{r["op"]:02X}' for r in run)
+        lasts = ', '.join(f'0x{r["last"]:02X}' for r in run)
+        repl[run[0]['insn_i']] = [
+            '    {',
+            f'        static const uint32_t run_at[] = {{ {ats} }};',
+            f'        static const uint8_t run_op[] = {{ {ops} }};',
+            f'        static const uint8_t run_last[] = {{ {lasts} }};',
+            f'        ct_insn_run(cpu, {len(run)}, run_at, run_op, run_last);',
+            '    }',
+        ]
+        for r in run[1:]:
+            drop.add(r['insn_i'])
+    out = []
+    for idx, ln in enumerate(lines):
+        if idx in repl:
+            out += repl[idx]
+        elif idx not in drop:
+            out.append(ln)
+    return out
 
 
 def implemented_opcodes() -> set[int]:
@@ -555,6 +661,7 @@ def emit_function(fm: funcs.FuncMeta, fn: decode.Function) -> list[str]:
             lines += [f'        {b}' for b in body]
             lines.append('    }')
     lines.append('}')
+    lines = batch_runs(lines)
     # every hand-off to the executor ends the function: a tail (cpu.h, #101)
     return [ln.replace('ct_interp_rest(cpu, s0);', 'ct_tail_rest(cpu, s0);') for ln in lines]
 

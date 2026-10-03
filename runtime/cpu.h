@@ -46,6 +46,12 @@ extern void (*ct_trace_hook)(const CPU *cpu, uint32_t addr);
    interrupts, begins this one). NULL outside the scheduler. */
 extern void (*ct_tick_hook)(CPU *cpu, uint32_t addr, uint8_t op);
 
+/* Batched accounting entry for straight-line register-only runs (ops.h
+   ct_insn_run), set by the frame scheduler; NULL keeps the ordinary
+   per-instruction path (tests, tracing, diff builds). */
+extern int (*ct_tick_run)(CPU *cpu, unsigned n, const uint32_t *at, const uint8_t *op,
+                          const uint8_t *last);
+
 /* Generated code calling code that isn't compiled (#30). Both run the
    CPU as the system executor does (ct_exec_hook: the frame scheduler, with
    native code for compiled callees, interrupts and timing; without it, the

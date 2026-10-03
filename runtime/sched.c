@@ -136,6 +136,8 @@ static void exec_hook(CPU *c, const ct_exec_until *u);
 static unsigned reset_delay(void);
 static void native_build(void);
 static void tick(CPU *c, uint32_t at, uint8_t op);
+static int tick_run(CPU *c, unsigned n, const uint32_t *at, const uint8_t *op,
+                    const uint8_t *last);
 
 static int irq_at;               /* this line's H/V timer clock, or -1 */
 static int irq_done, hblank_done;
@@ -171,6 +173,7 @@ static long int_depth;
 #define PROF_DEPTH 256
 #define PROF_REST (1u << 27)
 static uint64_t prof_native, prof_interp;
+static uint32_t last_at;   /* the previous tick's address (MVN/MVP, batching) */
 static struct {
     /* PB:PC | M << 24 | X << 25 | E << 26 | 1 << 31 (used), and the DB and
        DP it was entered with: DB << 32 | DP << 40. PROF_REST: not an entry
@@ -443,6 +446,7 @@ void sched_init(CPU *c)
     max_stack = 0;
     ct_tail_fn = NULL;
     ct_tick_hook = tick;
+    ct_tick_run = tick_run;
     ct_exec_hook = exec_hook;
     line = 0;
     hclock = 0;
@@ -1405,7 +1409,6 @@ static void tick_impl(CPU *c, uint32_t at, uint8_t op)
     }
     if (op == 0x40)
         int_depth--;   /* this native RTI (charged at the next boundary) */
-    static uint32_t last_at;
     if (!((op == 0x54 || op == 0x44) && at == last_at))
         prof_native++;   /* an MVN/MVP byte after the first isn't a new instruction */
     last_at = at;
@@ -1430,6 +1433,74 @@ static void tick(CPU *c, uint32_t at, uint8_t op)
 #else
     tick_impl(c, at, op);
 #endif
+}
+
+int (*ct_tick_run)(CPU *c, unsigned n, const uint32_t *at, const uint8_t *op,
+                   const uint8_t *last);
+
+/* Batched accounting for a run of straight-line register-only instructions
+   (emit.py groups them into ct_insn_run). Succeeds only when the run is
+   provably unobservable: nothing pending (interrupt, DMA/HDMA/init/delay),
+   no WRAM-hit overlay check, and the previous charge plus the whole run's
+   model clocks stay strictly before the next timed event, so no boundary
+   inside the run can see anything. Each member is priced at its own
+   address's fetch speed (the $8000 FastROM boundary can fall inside a run),
+   charged in one step, and only the last instruction is begun; any other
+   case returns 0 and ct_insn_run replays the exact per-instruction path. */
+static int tick_run(CPU *c, unsigned n, const uint32_t *at, const uint8_t *op,
+                    const uint8_t *last)
+{
+    if (n < 2 || ct_trace_hook || check_mode != 0 || !cur.pending)
+        return 0;
+    if (ct_wram_hit || pend.need_nmi || take_irq || pend.irq_line ||
+        (pend.delay | pend.hdma | pend.init | pend.dma) || pend.dma_after >= 0 ||
+        pend.nmi_count || pend.nmi_after >= 0)
+        return 0;
+    uint8_t m16 = cur.m16, x16 = cur.x16, dl = cur.dl, native = cur.native;
+    unsigned prev = cyc_impl_model_clocks();
+    unsigned sum = 0;
+    for (unsigned k = 0; k + 1 < n; k++) {
+        uint8_t o = op[k];
+        unsigned sz = cyc_op_size[o];
+        if (m16 && (o & 0x1F) == 0x09)
+            sz++;
+        if (x16 && (o == 0xA0 || o == 0xA2 || o == 0xC0 || o == 0xE0))
+            sz++;
+        uint8_t pen = cyc_pen[o];
+        unsigned np = cyc_base[o];
+        if ((pen & P_M) && m16)
+            np += 1;
+        if ((pen & P_M2) && m16)
+            np += 2;
+        if ((pen & P_X) && x16)
+            np += 1;
+        if ((pen & P_DL) && dl)
+            np += 1;
+        if ((pen & P_IDX) && x16)
+            np += 1;
+        if ((pen & P_RTI) && native)
+            np += 1;
+        unsigned spd = cyc_impl_master_per_cycle((uint8_t)(at[k] >> 16), (uint16_t)at[k]);
+        unsigned clk = spd * sz;
+        if (np > sz)
+            clk += (np - sz) * 6;
+        sum += clk;
+    }
+    if ((uint64_t)hclock + prev + sum >= next_ev)
+        return 0;
+    c->PB = (uint8_t)(at[n - 1] >> 16);
+    c->PC = (uint16_t)at[n - 1];
+    cur.pending = 0;
+    cur.interrupt = 0;
+    pend.prev_irq = pend.irq_line && !insn_i;
+    take_irq = pend.prev_irq;
+    hclock += prev + sum;
+    prof_native += n;
+    last_at = at[n - 1];
+    insn_i = c->i;
+    cyc_impl_begin_compiled(c, at[n - 1], op[n - 1]);
+    bus_mdr = last[n - 1];
+    return 1;
 }
 
 /* Interrupts are taken at the end of an instruction (Mesen 2
