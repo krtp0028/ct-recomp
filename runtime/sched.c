@@ -10,6 +10,7 @@
 #include "apu.h"
 #include "bus.h"
 #include "cycles.h"
+#include "cycles_impl.h"
 #include "dma.h"
 #include "func_table.h"
 #include "interp.h"
@@ -1042,14 +1043,18 @@ static void wai_cycle(void)
 }
 
 /* Charge an instruction (or interrupt entry) of `clocks` clocks. */
+static inline int charge_fast_ok(unsigned end)
+{
+    return !(pend.delay | pend.hdma | pend.init | pend.dma) && pend.dma_after < 0 &&
+           !pend.nmi_count && pend.nmi_after < 0 && end < next_ev;
+}
+
 static void charge_impl(unsigned clocks)
 {
     if (!clocks)
         return;   /* nothing begun (already charged): pending transfers wait */
     unsigned end = hclock + clocks;
-    int inside = (pend.delay | pend.hdma | pend.init | pend.dma) || pend.dma_after >= 0 ||
-                 pend.nmi_count || pend.nmi_after >= 0 || end >= next_ev;
-    if (!inside) {
+    if (charge_fast_ok(end)) {
         pend.prev_irq = pend.irq_line && !insn_i;   /* as at its last cycle start */
         take_irq = pend.prev_irq;
         cyc_done();
@@ -1359,7 +1364,20 @@ static void tick_impl(CPU *c, uint32_t at, uint8_t op)
 {
     c->PB = (uint8_t)(at >> 16);   /* as the interpreter has it at a boundary */
     c->PC = (uint16_t)at;
-    charge(cyc_finish());
+    /* The accounting is inlined (cycles.h) and the quiet charge is taken
+       here: when nothing timed is pending, charge_impl's fast branch is
+       exactly these four stores. Anything else goes through the slow
+       path. */
+    unsigned clocks = cyc_impl_finish();
+    unsigned end = hclock + clocks;
+    if (clocks && charge_fast_ok(end)) {
+        pend.prev_irq = pend.irq_line && !insn_i;
+        take_irq = pend.prev_irq;
+        cur.interrupt = 0;   /* cyc_done */
+        hclock = end;        /* advance() with no event */
+    } else {
+        charge(clocks);
+    }
     for (;;) {
         int nmi = pend.need_nmi;
         if (!nmi && !take_irq)

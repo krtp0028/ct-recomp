@@ -16,6 +16,20 @@
 extern int ct_cyc_cross;
 extern int ct_cyc_taken;
 
+/* CPU cycles per opcode for M=1 X=1 DL=0 (65C816 datasheet), plus which
+   penalties apply. Approximate, not cycle-exact: no DRAM refresh, and
+   every cycle of an instruction runs at the speed of the region it was
+   fetched from (see cyc_master_per_cycle). */
+enum {
+    P_M   = 1,      /* +1 if M=0 */
+    P_M2  = 2,      /* +2 if M=0 (read-modify-write) */
+    P_X   = 4,      /* +1 if X=0 */
+    P_DL  = 8,      /* +1 if the low byte of DP is nonzero */
+    P_IDX = 16,     /* +1 if the index crossed a page or X=0 (indexed reads) */
+    P_BR  = 32,     /* +1 if the branch was taken */
+    P_RTI = 128,    /* +1 in native mode */
+};
+
 void cyc_begin(const CPU *c, uint32_t at, uint8_t op);
 /* The same for compiled code, whose operand bytes are never fetched:
    they're charged from the instruction's length instead. */
@@ -47,7 +61,7 @@ void cyc_done(void);
 void cyc_check(void);
 
 /* Opcode fetch speed at PB:PC: 6 for FastROM (banks $80-$FF ROM with
-   MEMSEL bit 0), otherwise 8. */
+   MEMSEL bit 0 set), otherwise 8. */
 unsigned cyc_master_per_cycle(uint8_t pb, uint16_t pc);
 
 #endif

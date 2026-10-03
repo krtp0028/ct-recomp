@@ -4,25 +4,13 @@
 #include <stdlib.h>
 
 #include "bus.h"
+#include "cycles_impl.h"
 
 int ct_cyc_cross;
 int ct_cyc_taken;
 
-/* CPU cycles per opcode for M=1 X=1 DL=0 (65C816 datasheet), plus which
-   penalties apply. Approximate, not cycle-exact: no DRAM refresh, and
-   every cycle of an instruction runs at the speed of the region it was
-   fetched from (see master_per_cycle). */
-enum {
-    P_M   = 1,      /* +1 if M=0 */
-    P_M2  = 2,      /* +2 if M=0 (read-modify-write) */
-    P_X   = 4,      /* +1 if X=0 */
-    P_DL  = 8,      /* +1 if the low byte of DP is nonzero */
-    P_IDX = 16,     /* +1 if the index crossed a page or X=0 (indexed reads) */
-    P_BR  = 32,     /* +1 if the branch was taken */
-    P_RTI = 128,    /* +1 in native mode */
-};
-static uint8_t cyc_base[256], cyc_pen[256];
-static int built;
+uint8_t cyc_base[256], cyc_pen[256];
+int built;
 
 static void cyc(uint8_t op, uint8_t base, uint8_t pen)
 {
@@ -93,21 +81,17 @@ static void build_cycle_table(void)
     cyc(0xCB, 3, 0); cyc(0xDB, 3, 0);                               /* WAI STP */
 }
 
-/* Master clocks per CPU cycle for code fetched from PB:PC: 6 for FastROM
-   (banks $80-$FF ROM with MEMSEL bit 0 set), otherwise 8. */
 unsigned cyc_master_per_cycle(uint8_t pb, uint16_t pc)
 {
-    int rom = pb >= 0xC0 || ((pb & 0x7F) < 0x40 && pc >= 0x8000);
-    return (pb & 0x80) && rom && bus_fastrom() ? 6 : 8;
+    return cyc_impl_master_per_cycle(pb, pc);
 }
 
 /* The instruction begun and not yet charged. */
 
 static unsigned elapsed_fetches(void);
 static void build_templates(void);
-static unsigned cur_size(void);
 
-static const uint8_t op_size[256] = {   /* bytes with M=X=1 (recomp/decode.py) */
+const uint8_t cyc_op_size[256] = {   /* bytes with M=X=1 (recomp/decode.py) */
     2, 2, 2, 2, 2, 2, 2, 2, 1, 2, 1, 1, 3, 3, 3, 4,
     2, 2, 2, 2, 2, 2, 2, 2, 1, 3, 1, 1, 3, 3, 3, 4,
     3, 2, 4, 2, 2, 2, 2, 2, 1, 2, 1, 1, 3, 3, 3, 4,
@@ -126,32 +110,11 @@ static const uint8_t op_size[256] = {   /* bytes with M=X=1 (recomp/decode.py) *
     2, 2, 2, 2, 3, 2, 2, 2, 1, 3, 1, 1, 3, 3, 3, 4,
 };
 
-static struct {
-    int pending, compiled;
-    uint32_t at;
-    uint8_t op, m16, x16, dl, native, interrupt;
-    unsigned speed, size;
-} cur;
+struct cyc_cur cur;
 
 void cyc_begin(const CPU *c, uint32_t at, uint8_t op)
 {
-    if (!built) {
-        build_cycle_table();
-        build_templates();
-        built = 1;
-    }
-    cur.pending = 1;
-    cur.at = at;
-    cur.op = op;
-    cur.m16 = !c->m;
-    cur.x16 = !c->x;
-    cur.dl = (c->DP & 0xFF) != 0;
-    cur.native = !c->e;
-    cur.speed = cyc_master_per_cycle((uint8_t)(at >> 16), (uint16_t)at);
-    cur.compiled = 0;
-    cur.interrupt = 0;
-    ct_cyc_cross = ct_cyc_taken = 0;
-    ct_bus_clocks = ct_bus_n = 0;   /* the interpreter's opcode fetch is before this */
+    cyc_impl_begin(c, at, op);
 }
 
 int cyc_in_progress(void) { return cur.pending || cur.interrupt; }
@@ -167,9 +130,7 @@ void cyc_begin_interrupt(const CPU *c)
 
 void cyc_begin_compiled(const CPU *c, uint32_t at, uint8_t op)
 {
-    cyc_begin(c, at, op);
-    cur.compiled = 1;
-    cur.size = cur_size();   /* immediates grow with M (ORA..SBC #) and X (LDY LDX CPY CPX) */
+    cyc_impl_begin_compiled(c, at, op);
 }
 
 static unsigned elapsed_fetches(void)
@@ -182,16 +143,6 @@ unsigned cyc_elapsed(void)
     if (!cur.pending)
         return 0;
     return cur.speed * (1 + elapsed_fetches()) + ct_bus_clocks;
-}
-
-static unsigned cur_size(void)
-{
-    unsigned size = op_size[cur.op];
-    if (cur.m16 && (cur.op & 0x1F) == 0x09)
-        size++;
-    if (cur.x16 && (cur.op == 0xA0 || cur.op == 0xA2 || cur.op == 0xC0 || cur.op == 0xE0))
-        size++;
-    return size;
 }
 
 /* ---- cycle by cycle ----
@@ -276,6 +227,13 @@ static void build_templates(void)
     tmpl[0xCB] = tmpl[0xDB] = "FII";                               /* WAI STP */
 }
 
+void cyc_build_tables(void)
+{
+    build_cycle_table();
+    build_templates();
+    built = 1;
+}
+
 /* Interrupt entry: a fetch at PB:PC, an internal cycle, the pushes and the
    vector reads. */
 static const char *const tmpl_int = "FIDDDDDD";
@@ -335,8 +293,6 @@ unsigned cyc_cycles(uint8_t *clk, uint8_t *kind, int8_t *idx, unsigned max, unsi
     return n;
 }
 
-static unsigned model_clocks(void);
-
 void cyc_check(void)
 {
     uint8_t clk[128], kind[128];
@@ -346,7 +302,7 @@ void cyc_check(void)
     unsigned n = cyc_cycles(clk, kind, idx, sizeof clk, ~0u), total = 0;
     for (unsigned k = 0; k < n; k++)
         total += clk[k];
-    unsigned want = model_clocks();
+    unsigned want = cyc_impl_model_clocks();
     if (total != want) {
         static uint32_t seen[64];
         static unsigned n_seen;
@@ -366,45 +322,9 @@ void cyc_check(void)
    opcode fetch (and, for compiled code, the operand fetches it never
    makes) at the fetch speed, every counted bus access at its address's
    speed, the rest as 6-clock internal cycles. */
-static unsigned model_clocks(void)
-{
-    uint8_t pen = cyc_pen[cur.op];
-    unsigned n = cyc_base[cur.op];
-    if ((pen & P_M) && cur.m16)
-        n += 1;
-    if ((pen & P_M2) && cur.m16)
-        n += 2;
-    if ((pen & P_X) && cur.x16)
-        n += 1;
-    if ((pen & P_DL) && cur.dl)
-        n += 1;
-    if ((pen & P_IDX) && (ct_cyc_cross || cur.x16))
-        n += 1;
-    if ((pen & P_BR) && ct_cyc_taken)
-        n += 1;
-    if ((pen & P_RTI) && cur.native)
-        n += 1;
-    if (!n)
-        ct_fatal("interp $%06X: no cycle count for opcode $%02X", cur.at, cur.op);
-    unsigned fetches = cur.compiled ? cur.size - 1 : 0;
-    unsigned used = 1 + fetches + ct_bus_n;
-    unsigned clocks = cur.speed * (1 + fetches) + ct_bus_clocks;
-    if (n > used)
-        clocks += (n - used) * 6;
-    return clocks;
-}
-
-static int check_mode = -1;
+int check_mode = -1;
 
 unsigned cyc_finish(void)
 {
-    if (!cur.pending)
-        return 0;
-    if (check_mode < 0)
-        check_mode = getenv("CT_CYC_CHECK") != NULL;
-    if (check_mode)
-        cyc_check();
-    cur.pending = 0;
-    cur.interrupt = 0;
-    return model_clocks();
+    return cyc_impl_finish();
 }
