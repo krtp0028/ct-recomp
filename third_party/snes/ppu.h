@@ -133,6 +133,12 @@ struct Ppu {
   int32_t m7startY;
 
   uint16_t oam[0x110];
+  // ct-recomp: per-frame sprite Y buckets (even OAM word offsets, OAM order)
+  // so evaluation scans only sprites whose Y span covers the line; rebuilt
+  // when OAM or objSize changed. Order and limits are unchanged.
+  int oamGen, oamCacheGen, oamCacheSize;
+  int oamLineHead[256];
+  int oamLineNext[256];
   
   // store 31 extra entries to remove the need for clamp
   uint8_t brightnessMult[32 + 31];

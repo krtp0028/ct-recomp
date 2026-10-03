@@ -97,6 +97,8 @@ void ppu_reset(Ppu* ppu) {
   ppu->cgramSecondWrite = false;
   ppu->cgramBuffer = 0;
   memset(ppu->oam, 0, sizeof(ppu->oam));
+  ppu->oamGen++;
+  ppu->oamCacheGen = -1;   /* ct-recomp: no valid Y buckets yet */
   ppu->oamAdr = 0;
   ppu->oamSecondWrite = false;
   ppu->oamBuffer = 0;
@@ -1500,18 +1502,35 @@ static bool ppu_getWindowState(Ppu* ppu, int layer, int x) {
 }
 
 static bool ppu_evaluateSprites(Ppu* ppu, int line) {
-  // TODO: iterate over oam normally to determine in-range sprites,
-  //   then iterate those in-range sprites in reverse for tile-fetching
-  // TODO: rectangular sprites, wierdness with sprites at -256
-  int index = 0, index_end = index;
-  int spritesLeft = 32 + 1, tilesLeft = 34 + 1;
   uint8 spriteSizes[2] = { kSpriteSizes[ppu->objSize][0], kSpriteSizes[ppu->objSize][1] };
+  /* ct-recomp: build the per-frame Y span buckets once, in OAM order, so a
+     line only visits the sprites actually covering it. The scan order, the
+     32-sprite and 34-sliver limits and the range tests are unchanged. */
+  if (ppu->oamCacheGen != ppu->oamGen || ppu->oamCacheSize != ppu->objSize) {
+    for (int y = 0; y < 256; y++)
+      ppu->oamLineHead[y] = -1;
+    for (int i = 254; i >= 0; i -= 2) {
+      int yy = ppu->oam[i] >> 8;
+      if (yy == 0xf0)
+        continue;
+      int size = spriteSizes[(ppu->oam[0x100 + (i >> 4)] >> (i & 15) >> 1) & 1];
+      for (int r = 0; r < size; r++) {
+        int y = (yy + r) & 0xff;
+        ppu->oamLineNext[i] = ppu->oamLineHead[y];
+        ppu->oamLineHead[y] = i;
+      }
+    }
+    ppu->oamCacheGen = ppu->oamGen;
+    ppu->oamCacheSize = ppu->objSize;
+  }
+  int spritesLeft = 32 + 1, tilesLeft = 34 + 1;
   int extra_left_right = ppu->extraLeftRight;
   if (ppu->renderFlags & kPpuRenderFlags_NoSpriteLimits)
     spritesLeft = tilesLeft = 1024;
   int tilesLeftOrg = tilesLeft;
 
-  do {
+  for (int index = ppu->oamLineHead[line & 0xff]; index >= 0;
+       index = ppu->oamLineNext[index]) {
     int yy = ppu->oam[index] >> 8;
     if (yy == 0xf0)
       continue;  // this works for zelda because sprites are always 8 or 16.
@@ -1567,7 +1586,7 @@ static bool ppu_evaluateSprites(Ppu* ppu, int line) {
         }
       }
     }
-  } while ((index = (index + 2) & 0xff) != index_end);
+  }
   return (tilesLeft != tilesLeftOrg);
 }
 
@@ -1618,6 +1637,7 @@ void ppu_write(Ppu* ppu, uint8_t adr, uint8_t val) {
       } else {
         if (ppu->oamAdr < 0x110)
           ppu->oam[ppu->oamAdr++] = (val << 8) | ppu->oamBuffer;
+    ppu->oamGen++;
       }
       ppu->oamSecondWrite = !ppu->oamSecondWrite;
       break;
