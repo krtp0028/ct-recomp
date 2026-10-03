@@ -84,7 +84,7 @@ if(CT_PSP)
     add_executable(ct_psp ${CMAKE_SOURCE_DIR}/frontend/psp_main.c)
     target_include_directories(ct_psp PRIVATE ${CMAKE_SOURCE_DIR}/test)
     target_link_libraries(ct_psp ct_sched ct_gen_tables ct_gen pspdebug pspdisplay pspge pspaudio
-                          pspctrl)
+                          pspctrl psppower)
     target_compile_options(ct_psp PRIVATE ${CT_WARN})
     # Package for a real PSP (strip, fixup, PARAM.SFO, PBP); PPSSPP can boot
     # the EBOOT.PBP as-is.

@@ -14,6 +14,7 @@
 #include <pspctrl.h>
 #include <pspdisplay.h>
 #include <pspkernel.h>
+#include <psppower.h>
 #include <pspdebug.h>
 #include <pspthreadman.h>
 
@@ -223,6 +224,9 @@ static void on_frame(long f)
 
 int main(void)
 {
+    /* The kernel starts user code at 222 MHz; this port is CPU-bound, so ask
+       for the full 333/166. */
+    scePowerSetClockFrequency(333, 333, 166);
     pspDebugScreenInit();
     log_file = fopen(LOG_PATH, "w");
     ct_fatal_hook = on_fatal;
