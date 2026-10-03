@@ -146,11 +146,14 @@ static void oam_write(uint8_t v)
     if (b < 0x200) {
         if (!(b & 1))
             g_ppu->oamBuffer = v;
-        else
+        else {
             g_ppu->oam[b >> 1] = (uint16_t)(v << 8 | g_ppu->oamBuffer);
+            g_ppu->oamGen++;   /* the sprite Y buckets must refresh */
+        }
     } else {
         uint16_t *w = &g_ppu->oam[0x100 + ((b & 0x1F) >> 1)];
         *w = b & 1 ? (uint16_t)((*w & 0x00FF) | v << 8) : (uint16_t)((*w & 0xFF00) | v);
+        g_ppu->oamGen++;
     }
     b = (b + 1) & 0x3FF;
     g_ppu->oamAdr = (uint16_t)(b >> 1);

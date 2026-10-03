@@ -144,7 +144,7 @@ set_tests_properties(runtime_fatal_unhooked PROPERTIES PASS_REGULAR_EXPRESSION "
 set_tests_properties(runtime_fatal_decimal PROPERTIES PASS_REGULAR_EXPRESSION "ct: \\$E50000: ADC with D=1")
 set_tests_properties(runtime_fatal_entry PROPERTIES PASS_REGULAR_EXPRESSION "ct: \\$C08100: entry state m0 x0 e0, expected m1 x0")
 
-foreach(t snes_bus hw_map interp_modes interp_system sched stack_guard replay resample dsp)
+foreach(t snes_bus hw_map interp_modes interp_system sched stack_guard replay resample dsp ppu_sprites)
     ct_engine_test(test_${t} test/test_${t}.c)
     add_test(NAME ${t} COMMAND test_${t})
 endforeach()
