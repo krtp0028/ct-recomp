@@ -1080,40 +1080,52 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
         dst[0] = (math_enabled & (1u << ((d >> 8) & 0xf))) ? m[d & 0xff] : plain[d & 0xff];
       } while (dst++, ++i < right);
     } else {
+      const int px_add_sub = (math_enabled_cur & 0x100) != 0;
+      const int px_sub = (math_enabled_cur & 0x200) != 0;
       uint8 *half_color_map = ppu->halfColor ? ppu->brightnessMultHalf : ppu->brightnessMult;
-      // Store this in locals
       math_enabled_cur |= ppu->addSubscreen << 8 | ppu->subtractColor << 9;
-      // Need to check for each pixel whether to use math or not based on the main screen layer.
-      uint32 i = left;
-      do {
-        uint32 color = ppu->cgram[ppu->bgBuffers[0].data[i] & 0xff], color2;
-        uint8 main_layer = (ppu->bgBuffers[0].data[i] >> 8) & 0xf;
-        uint32 r = color & clip_color_mask;
-        uint32 g = (color >> 5) & clip_color_mask;
-        uint32 b = (color >> 10) & clip_color_mask;
-        uint8 *color_map = ppu->brightnessMult;
-        if (math_enabled_cur & (1 << main_layer)) {
-          if (math_enabled_cur & 0x100) {  // addSubscreen ?
-            if ((ppu->bgBuffers[1].data[i] & 0xff) != 0)
-              color2 = ppu->cgram[ppu->bgBuffers[1].data[i] & 0xff], color_map = half_color_map;
-            else  // Don't halve if ppu->addSubscreen && backdrop
-              color2 = fixed_color;
-          } else {
-            color2 = fixed_color, color_map = half_color_map;
-          }
-          uint32 r2 = (color2 & 0x1f), g2 = ((color2 >> 5) & 0x1f), b2 = ((color2 >> 10) & 0x1f);
-          if (math_enabled_cur & 0x200) {  // subtractColor?
-            r = (r >= r2) ? r - r2 : 0;
-            g = (g >= g2) ? g - g2 : 0;
-            b = (b >= b2) ? b - b2 : 0;
-          } else {
-            r += r2;
-            g += g2;
-            b += b2;
-          }
-        }
-        dst[0] = color_map[b] | color_map[g] << 8 | color_map[r] << 16;
-      } while (dst++, ++i < right);
+/* ct-recomp: the region-constant add/sub choices are hoisted out of the
+   per-pixel loop (four specialized loops); only the main-layer eligibility
+   test stays per pixel. Semantically identical to the branchy version. */
+#define CT_COMPOSE_FULL(ADDSUB, SUB)                                                       \
+      do {                                                                                 \
+        uint32 i = left;                                                                   \
+        do {                                                                               \
+          uint32 color = ppu->cgram[ppu->bgBuffers[0].data[i] & 0xff], color2;             \
+          uint8 main_layer = (ppu->bgBuffers[0].data[i] >> 8) & 0xf;                       \
+          uint32 r = color & clip_color_mask;                                              \
+          uint32 g = (color >> 5) & clip_color_mask;                                       \
+          uint32 b = (color >> 10) & clip_color_mask;                                      \
+          uint8 *color_map = ppu->brightnessMult;                                          \
+          if (math_enabled_cur & (1 << main_layer)) {                                      \
+            if (ADDSUB) {                                                                  \
+              if ((ppu->bgBuffers[1].data[i] & 0xff) != 0)                                 \
+                color2 = ppu->cgram[ppu->bgBuffers[1].data[i] & 0xff], color_map = half_color_map; \
+              else                                                                         \
+                color2 = fixed_color;                                                      \
+            } else {                                                                       \
+              color2 = fixed_color, color_map = half_color_map;                            \
+            }                                                                              \
+            uint32 r2 = (color2 & 0x1f), g2 = ((color2 >> 5) & 0x1f), b2 = ((color2 >> 10) & 0x1f); \
+            if (SUB) {                                                                     \
+              r = (r >= r2) ? r - r2 : 0;                                                  \
+              g = (g >= g2) ? g - g2 : 0;                                                  \
+              b = (b >= b2) ? b - b2 : 0;                                                  \
+            } else {                                                                       \
+              r += r2; g += g2; b += b2;                                                   \
+            }                                                                              \
+          }                                                                                \
+          dst[0] = color_map[b] | color_map[g] << 8 | color_map[r] << 16;                  \
+        } while (dst++, ++i < right);                                                      \
+      } while (0)
+      if (px_add_sub) {
+        if (px_sub) CT_COMPOSE_FULL(1, 1);
+        else CT_COMPOSE_FULL(1, 0);
+      } else {
+        if (px_sub) CT_COMPOSE_FULL(0, 1);
+        else CT_COMPOSE_FULL(0, 0);
+      }
+#undef CT_COMPOSE_FULL
     }
   } while (cw_clip_math >>= 1, ++windex < cwin.nr);
 #ifdef CT_PROFILE_TIME
