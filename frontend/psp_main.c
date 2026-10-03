@@ -116,13 +116,41 @@ static void present(void)
         sceDisplayWaitVblankStart();
     const uint8_t *fb = sched_frame();
     uint32_t *dst = fbmem[fb_index];
-    for (int y = 0; y < DISP_H; y++) {
-        const uint8_t *row = fb + (size_t)ymap[y] * SCHED_WIDTH * 4;
-        uint32_t *out = dst + (size_t)y * FB_W + SCALE_X;
+    /* Output ranges each source pixel expands to (xmap/ymap are fixed):
+       convert once per source pixel and copy the word to its range, one
+       source row at a time, so a row shown twice is built once. */
+    static uint16_t x0[256], x1[256], y0[SCHED_HEIGHT], y1[SCHED_HEIGHT];
+    static int built;
+    if (!built) {
         for (int x = 0; x < SCALE_W; x++) {
-            const uint8_t *s = row + (size_t)xmap[x] * 4;
+            if (!x || xmap[x] != xmap[x - 1])
+                x0[xmap[x]] = (uint16_t)x;
+            x1[xmap[x]] = (uint16_t)x;
+        }
+        for (int y = 0; y < DISP_H; y++) {
+            if (!y || ymap[y] != ymap[y - 1])
+                y0[ymap[y]] = (uint16_t)y;
+            y1[ymap[y]] = (uint16_t)y;
+        }
+        built = 1;
+    }
+    for (int cy = 0; cy < SCHED_HEIGHT; cy++) {
+        const uint8_t *src = fb + (size_t)cy * SCHED_WIDTH * 4;
+        uint32_t *r1 = dst + (size_t)y0[cy] * FB_W + SCALE_X;
+        uint32_t *r2 = y1[cy] > y0[cy] ? r1 + FB_W : 0;
+        for (int cx = 0; cx < SCHED_WIDTH; cx++) {
+            const uint8_t *s = src + (size_t)cx * 4;
             /* PSP 8888 display is A B G R in memory: red in the low byte. */
-            *out++ = 0xFF000000u | (uint32_t)s[0] << 16 | (uint32_t)s[1] << 8 | s[2];
+            uint32_t w = 0xFF000000u | (uint32_t)s[0] << 16 | (uint32_t)s[1] << 8 | s[2];
+            int a = x0[cx], b = x1[cx];
+            r1[a] = w;
+            if (b != a)
+                r1[b] = w;
+            if (r2) {
+                r2[a] = w;
+                if (b != a)
+                    r2[b] = w;
+            }
         }
     }
     sceDisplaySetFrameBuf(dst, FB_W, PSP_DISPLAY_PIXEL_FORMAT_8888, PSP_DISPLAY_SETBUF_NEXTFRAME);
