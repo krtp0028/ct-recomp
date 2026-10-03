@@ -9,7 +9,7 @@
 int ct_cyc_cross;
 int ct_cyc_taken;
 
-uint8_t cyc_base[256], cyc_pen[256];
+uint8_t cyc_base[256], cyc_pen[256], cyc_n1[2][256];
 int built;
 
 static void cyc(uint8_t op, uint8_t base, uint8_t pen)
@@ -230,6 +230,27 @@ static void build_templates(void)
 void cyc_build_tables(void)
 {
     build_cycle_table();
+    /* Counts with the penalties the common compiled state always incurs
+       (X=16-bit, DL=0, native). P_DL, P_IDX in 8-bit index mode and P_BR
+       still depend on what the instruction did, and are applied at charge
+       time (cyc_impl_model_clocks). */
+    for (unsigned op = 0; op < 256; op++) {
+        uint8_t pen = cyc_pen[op];
+        for (unsigned m16 = 0; m16 < 2; m16++) {
+            unsigned n = cyc_base[op];
+            if ((pen & P_M) && m16)
+                n += 1;
+            if ((pen & P_M2) && m16)
+                n += 2;
+            if (pen & P_X)
+                n += 1;
+            if (pen & P_IDX)
+                n += 1;
+            if (pen & P_RTI)
+                n += 1;
+            cyc_n1[m16][op] = (uint8_t)n;
+        }
+    }
     build_templates();
     built = 1;
 }

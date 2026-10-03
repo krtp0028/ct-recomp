@@ -19,7 +19,7 @@ struct cyc_cur {
     unsigned speed, size;
 };
 extern struct cyc_cur cur;
-extern uint8_t cyc_base[256], cyc_pen[256];
+extern uint8_t cyc_base[256], cyc_pen[256], cyc_n1[2][256];
 extern int built;
 extern int check_mode;
 extern const uint8_t cyc_op_size[256];   /* bytes with M=X=1 (recomp/decode.py) */
@@ -51,21 +51,29 @@ static inline unsigned cyc_impl_cur_size(void)
 static inline unsigned cyc_impl_model_clocks(void)
 {
     uint8_t pen = cyc_pen[cur.op];
-    unsigned n = cyc_base[cur.op];
-    if ((pen & P_M) && cur.m16)
-        n += 1;
-    if ((pen & P_M2) && cur.m16)
-        n += 2;
-    if ((pen & P_X) && cur.x16)
-        n += 1;
-    if ((pen & P_DL) && cur.dl)
-        n += 1;
-    if ((pen & P_IDX) && (ct_cyc_cross || cur.x16))
-        n += 1;
-    if ((pen & P_BR) && ct_cyc_taken)
-        n += 1;
-    if ((pen & P_RTI) && cur.native)
-        n += 1;
+    unsigned n;
+    if (cur.compiled && cur.x16 && !cur.dl && cur.native) {
+        /* the common state: everything but P_BR is already folded in */
+        n = cyc_n1[cur.m16][cur.op];
+        if ((pen & P_BR) && ct_cyc_taken)
+            n += 1;
+    } else {
+        n = cyc_base[cur.op];
+        if ((pen & P_M) && cur.m16)
+            n += 1;
+        if ((pen & P_M2) && cur.m16)
+            n += 2;
+        if ((pen & P_X) && cur.x16)
+            n += 1;
+        if ((pen & P_DL) && cur.dl)
+            n += 1;
+        if ((pen & P_IDX) && (ct_cyc_cross || cur.x16))
+            n += 1;
+        if ((pen & P_BR) && ct_cyc_taken)
+            n += 1;
+        if ((pen & P_RTI) && cur.native)
+            n += 1;
+    }
     if (!n)
         ct_fatal("interp $%06X: no cycle count for opcode $%02X", cur.at, cur.op);
     unsigned fetches = cur.compiled ? cur.size - 1 : 0;
