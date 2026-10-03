@@ -1080,10 +1080,10 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
         dst[0] = (math_enabled & (1u << ((d >> 8) & 0xf))) ? m[d & 0xff] : plain[d & 0xff];
       } while (dst++, ++i < right);
     } else {
-      const int px_add_sub = (math_enabled_cur & 0x100) != 0;
-      const int px_sub = (math_enabled_cur & 0x200) != 0;
       uint8 *half_color_map = ppu->halfColor ? ppu->brightnessMultHalf : ppu->brightnessMult;
       math_enabled_cur |= ppu->addSubscreen << 8 | ppu->subtractColor << 9;
+      const int px_add_sub = (math_enabled_cur & 0x100) != 0;
+      const int px_sub = (math_enabled_cur & 0x200) != 0;
 /* ct-recomp: the region-constant add/sub choices are hoisted out of the
    per-pixel loop (four specialized loops); only the main-layer eligibility
    test stays per pixel. Semantically identical to the branchy version. */
