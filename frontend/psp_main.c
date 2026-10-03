@@ -103,6 +103,17 @@ static void on_fatal(const char *msg)
 
 static void present(void)
 {
+    /* A flip handed to the display lands at the next vblank (59.94 Hz: a
+       16.683 ms field). Before drawing into the buffer it will retire, wait
+       when the last flip may still be pending; at a frame time of a field or
+       more it has certainly landed, and waiting would only burn emulation
+       time (the engine is far slower than the display). The first call has
+       no flip outstanding: it draws into the buffer that was never shown. */
+    enum { FIELD_US = 16684 };   /* one 59.94 Hz field, rounded up */
+    static uint64_t last_flip;
+    uint64_t now = sceKernelGetSystemTimeWide();
+    if (last_flip && now - last_flip < FIELD_US)
+        sceDisplayWaitVblankStart();
     const uint8_t *fb = sched_frame();
     uint32_t *dst = fbmem[fb_index];
     for (int y = 0; y < DISP_H; y++) {
@@ -116,7 +127,7 @@ static void present(void)
     }
     sceDisplaySetFrameBuf(dst, FB_W, PSP_DISPLAY_PIXEL_FORMAT_8888, PSP_DISPLAY_SETBUF_NEXTFRAME);
     fb_index ^= 1;
-    sceDisplayWaitVblankStart();
+    last_flip = sceKernelGetSystemTimeWide();
 }
 
 static void queue_audio(void)
